@@ -21,6 +21,12 @@ bool gameEngineThreadExited = false;
 pthread_mutex_t ghostExitMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t ghostExitCond = PTHREAD_COND_INITIALIZER;
 int ghostThreadsExited = 0;
+pthread_mutex_t ghost_house_entrance_mutex;
+sem_t keys;        // Semaphore for keys
+sem_t exit_permits; // Semaphore for exit permits
+#define TOTAL_KEYS 2        // Number of available keys
+#define TOTAL_EXIT_PERMITS 2 // Number of available exit permits
+
 
 // Direction constants
 typedef enum {
@@ -272,9 +278,57 @@ void saveOriginalBoard() {
         }
     }
 }
+
+void init_ghost_house_resources() {
+    pthread_mutex_init(&ghost_house_entrance_mutex, NULL);
+    sem_init(&keys, 0, TOTAL_KEYS);
+    sem_init(&exit_permits, 0, TOTAL_EXIT_PERMITS);
+}
+
+
+void leave_ghost_house(int ghost_id) {
+    // Try to acquire resources in a specific order to prevent deadlock
+    // First get a key, then an exit permit
+    
+    printf("Ghost %d is trying to acquire a key\n", ghost_id);
+    sem_wait(&keys);
+    printf("Ghost %d acquired a key\n", ghost_id);
+    
+    printf("Ghost %d is trying to acquire an exit permit\n", ghost_id);
+    sem_wait(&exit_permits);
+    printf("Ghost %d acquired an exit permit\n", ghost_id);
+    
+    // Lock the entrance while exiting
+    pthread_mutex_lock(&ghost_house_entrance_mutex);
+    printf("Ghost %d is leaving the ghost house\n", ghost_id);
+    // Simulate time to exit
+    usleep(50000);
+    pthread_mutex_unlock(&ghost_house_entrance_mutex);
+    
+    // Release resources in reverse order
+    sem_post(&exit_permits);
+    sem_post(&keys);
+    printf("Ghost %d has left the ghost house and released resources\n", ghost_id);
+}
+
+void cleanup_ghost_house_resources() {
+    pthread_mutex_destroy(&ghost_house_entrance_mutex);
+    sem_destroy(&keys);
+    sem_destroy(&exit_permits);
+}
+
+void return_to_ghost_house(int ghost_id) {
+    pthread_mutex_lock(&ghost_house_entrance_mutex);
+    printf("Ghost %d is returning to the ghost house\n", ghost_id);
+    // Simulate time to enter
+    usleep(50000);
+    pthread_mutex_unlock(&ghost_house_entrance_mutex);
+    printf("Ghost %d has returned to the ghost house\n", ghost_id);
+}
 // Function to initialize ghosts at their starting positions
 void initGhosts() {
-    // Define starting positions for ghosts
+    // Define starting positions for ghosts 
+    init_ghost_house_resources();
     int ghostStartPositions[MAX_GHOSTS][2] = {
         {7, 9},   // Ghost 1 - Middle of the board
         {7, 10},  // Ghost 2 - Middle of the board
@@ -568,96 +622,110 @@ typedef struct TimerThreadArgs {
     bool isRunning;
 } TimerThreadArgs;
 
+bool game_over = false;
 // Main function for ghost thread
 void* ghostThreadFunc(void* arg) {
-    Ghost* ghost = (Ghost*)arg;
+    Ghost* ghost = (Ghost*)arg;  // Changed from int to Ghost* since errors suggest ghost is a struct
+    int ghost_id = ghost->id;    // Access id through the struct
     
-    // Different speeds for different ghosts
-    int moveInterval = 200 + (ghost->id * 50);  // milliseconds
-    
-    // Use a semaphore to control movement timing for this ghost
-    sem_t moveSemaphore;
-    sem_init(&moveSemaphore, 0, 0);
-    
-    // Need a separate thread to signal the semaphore at the appropriate intervals
-    pthread_t timerThread;
-    TimerThreadArgs timerArgs;
-    timerArgs.semaphore = &moveSemaphore;
-    timerArgs.intervalMs = moveInterval;
-    timerArgs.isRunning = true;
-    
-    // Start the timer thread
-    pthread_create(&timerThread, NULL, ghostTimerThread, &timerArgs);
-    
-    while (ghostThreadsRunning) {
-        // Wait on semaphore - this is not an explicit wait mechanism but a synchronization primitive
-        sem_wait(&moveSemaphore);
+    while (!game_over) {
+        // Initial state - ghost in the house
+        leave_ghost_house(ghost_id);
         
-        // Check if the game is running and not paused
-        pthread_mutex_lock(&gameState.mutex);
-        bool gameRunning = gameState.gameRunning;
-        bool gamePaused = gameState.gamePaused;
-        pthread_mutex_unlock(&gameState.mutex);
+        // Different speeds for different ghosts
+        int moveInterval = 200 + (ghost->id * 50);  // fixed: Ghost->id to ghost->id
         
-        if (!gameRunning) {
-            break;
-        }
+        // Use a semaphore to control movement timing for this ghost
+        sem_t moveSemaphore;
+        sem_init(&moveSemaphore, 0, 0);
         
-        pthread_mutex_lock(&uiState.mutex);
-        bool isPlayScreen = (uiState.currentScreen == SCREEN_PLAY);
-        pthread_mutex_unlock(&uiState.mutex);
+        // Need a separate thread to signal the semaphore at the appropriate intervals
+        pthread_t timerThread;
+        TimerThreadArgs timerArgs;
+        timerArgs.semaphore = &moveSemaphore;
+        timerArgs.intervalMs = moveInterval;
+        timerArgs.isRunning = true;
         
-        if (isPlayScreen && !gamePaused) {
-            // Check if ghost needs to respawn
-            if (ghost->needsRespawn) {
-                pthread_mutex_lock(&gameState.mutex);
-                ghost->row = ghost->respawnRow;
-                ghost->col = ghost->respawnCol;
-                ghost->isVulnerable = false;
-                ghost->needsRespawn = false;
-                gameState.board[ghost->row][ghost->col] = '#';
-                pthread_mutex_unlock(&gameState.mutex);
+        // Start the timer thread
+        pthread_create(&timerThread, NULL, ghostTimerThread, &timerArgs);
+        
+        while (ghostThreadsRunning) {
+            // Wait on semaphore - this is not an explicit wait mechanism but a synchronization primitive
+            sem_wait(&moveSemaphore);
+            
+            // Check if the game is running and not paused
+            pthread_mutex_lock(&gameState.mutex);
+            bool gameRunning = gameState.gameRunning;
+            bool gamePaused = gameState.gamePaused;
+            pthread_mutex_unlock(&gameState.mutex);
+            
+            if (!gameRunning) {
+                game_over = true;
+                break;
             }
             
-            // Update ghost vulnerability status
-            pthread_mutex_lock(&gameState.mutex);
-            ghost->isVulnerable = gameState.ghostVulnerable;
-            pthread_mutex_unlock(&gameState.mutex);
+            pthread_mutex_lock(&uiState.mutex);
+            bool isPlayScreen = (uiState.currentScreen == SCREEN_PLAY);
+            pthread_mutex_unlock(&uiState.mutex);
             
-            // Get Pacman's current position
-            int pacmanRow, pacmanCol;
-            pthread_mutex_lock(&gameState.mutex);
-            pacmanRow = gameState.pacmanRow;
-            pacmanCol = gameState.pacmanCol;
-            pthread_mutex_unlock(&gameState.mutex);
-            
-            // Calculate direction weights
-            DirectionWeights weights = calculateDirectionWeights(ghost, pacmanRow, pacmanCol);
-            
-            // Choose direction
-            Direction newDirection = chooseGhostDirection(ghost, weights);
-            
-            // Move ghost
-            moveGhost(ghost, newDirection);
+            if (isPlayScreen && !gamePaused) {
+                // Check if ghost needs to respawn
+                if (ghost->needsRespawn) {  // fixed: ghost->needsRespawn
+                    pthread_mutex_lock(&gameState.mutex);
+                    ghost->row = ghost->respawnRow;
+                    ghost->col = ghost->respawnCol;
+                    ghost->isVulnerable = false;
+                    ghost->needsRespawn = false;
+                    gameState.board[ghost->row][ghost->col] = '#';
+                    pthread_mutex_unlock(&gameState.mutex);
+                }
+                
+                // Update ghost vulnerability status
+                pthread_mutex_lock(&gameState.mutex);
+                ghost->isVulnerable = gameState.ghostVulnerable;
+                pthread_mutex_unlock(&gameState.mutex);
+                
+                // Get Pacman's current position
+                int pacmanRow, pacmanCol;
+                pthread_mutex_lock(&gameState.mutex);
+                pacmanRow = gameState.pacmanRow;
+                pacmanCol = gameState.pacmanCol;
+                pthread_mutex_unlock(&gameState.mutex);
+                
+                // Calculate direction weights
+                DirectionWeights weights = calculateDirectionWeights(ghost, pacmanRow, pacmanCol);
+                
+                // Choose direction
+                Direction newDirection = chooseGhostDirection(ghost, weights);
+                
+                // Move ghost
+                moveGhost(ghost, newDirection);
+            }
         }
+        
+        // Stop the timer thread
+        timerArgs.isRunning = false;
+        pthread_join(timerThread, NULL);
+        
+        // Clean up
+        sem_destroy(&moveSemaphore);
+        
+        // Signal that this ghost thread has exited
+        pthread_mutex_lock(&ghostExitMutex);
+        ghostThreadsExited++;
+        
+        // If this is the last ghost thread to exit, signal the main thread
+        if (ghostThreadsExited >= MAX_GHOSTS) {
+            pthread_cond_signal(&ghostExitCond);
+        }
+        pthread_mutex_unlock(&ghostExitMutex);
+        
+        // When ghost is eaten or needs to return
+        return_to_ghost_house(ghost_id);
+        
+        // Wait for a bit before trying to leave again
+        usleep(random() % 1000000);
     }
-    
-    // Stop the timer thread
-    timerArgs.isRunning = false;
-    pthread_join(timerThread, NULL);
-    
-    // Clean up
-    sem_destroy(&moveSemaphore);
-    
-    // Signal that this ghost thread has exited
-    pthread_mutex_lock(&ghostExitMutex);
-    ghostThreadsExited++;
-    
-    // If this is the last ghost thread to exit, signal the main thread
-    if (ghostThreadsExited >= MAX_GHOSTS) {
-        pthread_cond_signal(&ghostExitCond);
-    }
-    pthread_mutex_unlock(&ghostExitMutex);
     
     return NULL;
 }
@@ -1794,6 +1862,6 @@ int main() {
     pthread_cond_destroy(&gameEngineThreadExitCond);
     pthread_mutex_destroy(&ghostExitMutex);
     pthread_cond_destroy(&ghostExitCond);
-    
+    cleanup_ghost_house_resources();
     return 0;
 }
