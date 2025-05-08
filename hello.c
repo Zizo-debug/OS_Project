@@ -281,26 +281,42 @@ void saveOriginalBoard() {
 
 void init_ghost_house_resources() {
     pthread_mutex_init(&ghost_house_entrance_mutex, NULL);
-    sem_init(&keys, 0, TOTAL_KEYS);
-    sem_init(&exit_permits, 0, TOTAL_EXIT_PERMITS);
+    sem_init(&keys, 0, 2); // 2 keys available
+    sem_init(&exit_permits, 0, 2); // 2 exit permits available
+    
+    // Define ghost house positions
+    #define GHOST_HOUSE_EXIT_ROW (ROWS / 2)
+    #define GHOST_HOUSE_EXIT_COL (COLS / 2)
+    
+    // Initialize ghost starting positions
+    for (int i = 0; i < MAX_GHOSTS; i++) {
+        ghosts[i].startRow = GHOST_HOUSE_EXIT_ROW - 1 + (i % 2);
+        ghosts[i].startCol = GHOST_HOUSE_EXIT_COL - 1 + (i / 2);
+        ghosts[i].row = ghosts[i].startRow;
+        ghosts[i].col = ghosts[i].startCol;
+        ghosts[i].inGhostHouse = true;
+    }
 }
-
-
-void leave_ghost_house(int ghost_id) {
+// 3. Implement the ghost house functionality
+void leave_ghost_house(Ghost *ghost) {
     // Try to acquire resources in a specific order to prevent deadlock
-    // First get a key, then an exit permit
-    
-    printf("Ghost %d is trying to acquire a key\n", ghost_id);
     sem_wait(&keys);
-    printf("Ghost %d acquired a key\n", ghost_id);
+    printf("Ghost %d acquired a key\n", ghost->id);
     
-    printf("Ghost %d is trying to acquire an exit permit\n", ghost_id);
     sem_wait(&exit_permits);
-    printf("Ghost %d acquired an exit permit\n", ghost_id);
+    printf("Ghost %d acquired an exit permit\n", ghost->id);
     
     // Lock the entrance while exiting
     pthread_mutex_lock(&ghost_house_entrance_mutex);
-    printf("Ghost %d is leaving the ghost house\n", ghost_id);
+    printf("Ghost %d is leaving the ghost house\n", ghost->id);
+    
+    // Set the ghost's position to just outside the ghost house
+    pthread_mutex_lock(&mutex);
+    ghost->row = GHOST_HOUSE_EXIT_ROW;
+    ghost->col = GHOST_HOUSE_EXIT_COL;
+    ghost->inGhostHouse = false;
+    pthread_mutex_unlock(&mutex);
+    
     // Simulate time to exit
     usleep(50000);
     pthread_mutex_unlock(&ghost_house_entrance_mutex);
@@ -308,14 +324,35 @@ void leave_ghost_house(int ghost_id) {
     // Release resources in reverse order
     sem_post(&exit_permits);
     sem_post(&keys);
-    printf("Ghost %d has left the ghost house and released resources\n", ghost_id);
+    printf("Ghost %d has left the ghost house and released resources\n", ghost->id);
 }
+
+
+void return_to_ghost_house(Ghost *ghost) {
+    pthread_mutex_lock(&ghost_house_entrance_mutex);
+    printf("Ghost %d is returning to the ghost house\n", ghost->id);
+    
+    // Set the ghost's position to inside the ghost house
+    pthread_mutex_lock(&mutex);
+    ghost->row = ghost->startRow;
+    ghost->col = ghost->startCol;
+    ghost->inGhostHouse = true;
+    ghost->isVulnerable = false;
+    pthread_mutex_unlock(&mutex);
+    
+    // Simulate time to enter
+    usleep(50000);
+    pthread_mutex_unlock(&ghost_house_entrance_mutex);
+    printf("Ghost %d has returned to the ghost house\n", ghost->id);
+}
+
 
 void cleanup_ghost_house_resources() {
     pthread_mutex_destroy(&ghost_house_entrance_mutex);
     sem_destroy(&keys);
     sem_destroy(&exit_permits);
 }
+
 
 void return_to_ghost_house(int ghost_id) {
     pthread_mutex_lock(&ghost_house_entrance_mutex);
@@ -480,135 +517,238 @@ DirectionWeights calculateDirectionWeights(Ghost* ghost, int targetRow, int targ
     return weights;
 }
 
-// Choose direction based on weights and valid moves
-Direction chooseGhostDirection(Ghost* ghost, DirectionWeights weights) {
-    // Adjust weights based on valid moves
-    if (!isValidGhostMove(ghost->row - 1, ghost->col)) weights.up = 0.0f;
-    if (!isValidGhostMove(ghost->row + 1, ghost->col)) weights.down = 0.0f;
-    if (!isValidGhostMove(ghost->row, ghost->col - 1)) weights.left = 0.0f;
-    if (!isValidGhostMove(ghost->row, ghost->col + 1)) weights.right = 0.0f;
+// 2. Improved ghost direction selection logic to make ghosts less aggressive
+Direction chooseDirection(Ghost *ghost) {
+    // Define possible directions
+    Direction possibleDirections[4] = {UP, DOWN, LEFT, RIGHT};
+    int validDirections[4];
+    int numValidDirections = 0;
     
-    // Calculate total weight
-    float totalWeight = weights.up + weights.down + weights.left + weights.right;
-    
-    // If no valid moves, try a random direction
-    if (totalWeight <= 0.0f) {
-        Direction randomDir;
-        do {
-            randomDir = (Direction)(rand() % 4 + 1);  // Random direction 1-4
-            
-            // Check if the random direction is valid
-            switch (randomDir) {
-                case DIR_UP:    if (isValidGhostMove(ghost->row - 1, ghost->col)) return randomDir; break;
-                case DIR_DOWN:  if (isValidGhostMove(ghost->row + 1, ghost->col)) return randomDir; break;
-                case DIR_LEFT:  if (isValidGhostMove(ghost->row, ghost->col - 1)) return randomDir; break;
-                case DIR_RIGHT: if (isValidGhostMove(ghost->row, ghost->col + 1)) return randomDir; break;
-                default: break;
-            }
-        } while (1);  // Keep trying until a valid move is found
+    // Check which directions are valid (no wall)
+    if (ghost->row > 0 && board[ghost->row - 1][ghost->col] != '#') {
+        validDirections[numValidDirections++] = UP;
+    }
+    if (ghost->row < ROWS - 1 && board[ghost->row + 1][ghost->col] != '#') {
+        validDirections[numValidDirections++] = DOWN;
+    }
+    if (ghost->col > 0 && board[ghost->row][ghost->col - 1] != '#') {
+        validDirections[numValidDirections++] = LEFT;
+    }
+    if (ghost->col < COLS - 1 && board[ghost->row][ghost->col + 1] != '#') {
+        validDirections[numValidDirections++] = RIGHT;
     }
     
-    // Choose direction based on weights
-    float random = ((float)rand() / RAND_MAX) * totalWeight;
-    
-    if (random < weights.up) return DIR_UP;
-    random -= weights.up;
-    
-    if (random < weights.down) return DIR_DOWN;
-    random -= weights.down;
-    
-    if (random < weights.left) return DIR_LEFT;
-    
-    return DIR_RIGHT;
-}
-
-void moveGhost(Ghost* ghost, Direction direction) {
-    pthread_mutex_lock(&gameState.mutex);
-    
-    int oldRow = ghost->row;
-    int oldCol = ghost->col;
-    int newRow = oldRow;
-    int newCol = oldCol;
-    
-    // Calculate new position
-    switch (direction) {
-        case DIR_UP:    newRow--; break;
-        case DIR_DOWN:  newRow++; break;
-        case DIR_LEFT:  newCol--; break;
-        case DIR_RIGHT: newCol++; break;
-        default: break;
+    // If there are no valid directions, maintain current direction
+    if (numValidDirections == 0) {
+        return ghost->direction;
     }
     
-    // Check if move is valid
-    if (!isValidGhostMove(newRow, newCol)) {
-        pthread_mutex_unlock(&gameState.mutex);
-        return;
-    }
-    
-    // Check collision with Pacman
-    if (newRow == gameState.pacmanRow && newCol == gameState.pacmanCol) {
-        if (ghost->isVulnerable) {
-            // Ghost was eaten
-            ghost->needsRespawn = true;
-            gameState.score += 200;
+    // Ghost behavior depends on whether it's vulnerable
+    if (ghost->isVulnerable) {
+        // When vulnerable, try to move away from Pacman
+        int maxDistance = -1;
+        Direction bestDirection = ghost->direction;
+        
+        for (int i = 0; i < numValidDirections; i++) {
+            int newRow = ghost->row;
+            int newCol = ghost->col;
             
-            // Restore old position from original board
-            gameState.board[oldRow][oldCol] = gameState.originalBoard[oldRow][oldCol];
-            
-            // Move ghost to respawn position
-            ghost->row = ghost->respawnRow;
-            ghost->col = ghost->respawnCol;
-            gameState.board[ghost->row][ghost->col] = '#';
-        } else {
-            // Pacman was caught - lose a life
-            gameState.lives--;
-            
-            // Remove Pacman from current position
-            gameState.board[gameState.pacmanRow][gameState.pacmanCol] = ' ';
-            
-            // Reset Pacman to starting position
-            gameState.pacmanRow = gameState.pacmanStartRow;
-            gameState.pacmanCol = gameState.pacmanStartCol;
-            gameState.board[gameState.pacmanRow][gameState.pacmanCol] = '@';
-            
-            // Reset all ghosts to their starting positions
-            for (int i = 0; i < MAX_GHOSTS; i++) {
-                gameState.board[ghosts[i].row][ghosts[i].col] = ' ';
-                ghosts[i].row = ghosts[i].respawnRow;
-                ghosts[i].col = ghosts[i].respawnCol;
-                ghosts[i].isVulnerable = false;
-                gameState.board[ghosts[i].row][ghosts[i].col] = '#';
+            switch (validDirections[i]) {
+                case UP: newRow--; break;
+                case DOWN: newRow++; break;
+                case LEFT: newCol--; break;
+                case RIGHT: newCol++; break;
             }
             
-            // Reset Pacman's direction
-            gameState.currentDirection = DIR_NONE;
+            // Calculate Manhattan distance to Pacman
+            int distance = abs(newRow - pacmanRow) + abs(newCol - pacmanCol);
             
-            // Check for game over
-            if (gameState.lives <= 0) {
-                pthread_mutex_lock(&uiState.mutex);
-                uiState.currentScreen = SCREEN_GAME_OVER;
-                uiState.needsRedraw = true;
-                pthread_mutex_unlock(&uiState.mutex);
+            // Prefer the direction that maximizes distance
+            if (distance > maxDistance) {
+                maxDistance = distance;
+                bestDirection = validDirections[i];
             }
         }
-        pthread_mutex_unlock(&gameState.mutex);
-        return;
+        
+        // 80% chance to choose the best direction, 20% chance for random movement
+        if (rand() % 100 < 80) {
+            return bestDirection;
+        } else {
+            return validDirections[rand() % numValidDirections];
+        }
+    } else {
+        // Normal ghost behavior - 60% chance to move toward Pacman, 40% random
+        if (rand() % 100 < 60) {
+            int minDistance = INT_MAX;
+            Direction bestDirection = ghost->direction;
+            
+            for (int i = 0; i < numValidDirections; i++) {
+                int newRow = ghost->row;
+                int newCol = ghost->col;
+                
+                switch (validDirections[i]) {
+                    case UP: newRow--; break;
+                    case DOWN: newRow++; break;
+                    case LEFT: newCol--; break;
+                    case RIGHT: newCol++; break;
+                }
+                
+                // Calculate Manhattan distance to Pacman
+                int distance = abs(newRow - pacmanRow) + abs(newCol - pacmanCol);
+                
+                // Prefer the direction that minimizes distance
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    bestDirection = validDirections[i];
+                }
+            }
+            
+            return bestDirection;
+        } else {
+            // Random movement
+            return validDirections[rand() % numValidDirections];
+        }
+    }
+}
+
+
+// 8. Timer function for ghost vulnerability
+void* vulnerabilityTimer(void* arg) {
+    // Vulnerable for 10 seconds
+    usleep(10000000);
+    
+    pthread_mutex_lock(&mutex);
+    // End vulnerability for all ghosts
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        if (!ghosts[i].needsRespawn) { // Only if not already being respawned
+            ghosts[i].isVulnerable = false;
+        }
+    }
+    pthread_mutex_unlock(&mutex);
+    
+    return NULL;
+}
+// 7. Improved power pellet handling
+void eatPowerPellet() {
+    pthread_mutex_lock(&mutex);
+    
+    // Make ghosts vulnerable
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        ghosts[i].isVulnerable = true;
     }
     
-    // Normal ghost movement
-    // Restore old position from original board
-    gameState.board[oldRow][oldCol] = gameState.originalBoard[oldRow][oldCol];
+    // Update score
+    pthread_mutex_lock(&score_mutex);
+    score += 50;
+    pthread_mutex_unlock(&score_mutex);
     
-    // Update ghost position
-    ghost->row = newRow;
-    ghost->col = newCol;
+    pthread_mutex_unlock(&mutex);
     
-    // Place ghost at new position (preserving what's underneath)
-    gameState.board[newRow][newCol] = '#';
+    // Start a timer to end vulnerability
+    pthread_t timerThread;
+    pthread_create(&timerThread, NULL, vulnerabilityTimer, NULL);
+}
+
+// 1. Modify the moveGhost function to make ghost movement more predictable 
+// and ensure they can be eaten when vulnerable
+void moveGhost(Ghost *ghost) {
+    pthread_mutex_lock(&mutex);
     
-    ghost->direction = direction;
+    // Get current position
+    int currentRow = ghost->row;
+    int currentCol = ghost->col;
     
-    pthread_mutex_unlock(&gameState.mutex);
+    // Clear current position on board
+    board[currentRow][currentCol] = ghost->cellContent;
+    
+    // Choose a new direction with improved logic
+    Direction newDirection = chooseDirection(ghost);
+    
+    // Calculate new position
+    int newRow = currentRow;
+    int newCol = currentCol;
+    
+    // Move based on direction - with collision detection
+    switch (newDirection) {
+        case UP:
+            if (currentRow > 0 && board[currentRow - 1][currentCol] != '#') {
+                newRow = currentRow - 1;
+            }
+            break;
+        case DOWN:
+            if (currentRow < ROWS - 1 && board[currentRow + 1][currentCol] != '#') {
+                newRow = currentRow + 1;
+            }
+            break;
+        case LEFT:
+            if (currentCol > 0 && board[currentRow][currentCol - 1] != '#') {
+                newCol = currentCol - 1;
+            }
+            break;
+        case RIGHT:
+            if (currentCol < COLS - 1 && board[currentRow][currentCol + 1] != '#') {
+                newCol = currentCol + 1;
+            }
+            break;
+    }
+    
+    // Check if Pacman is at the new position
+    if (newRow == pacmanRow && newCol == pacmanCol) {
+        if (ghost->isVulnerable) {
+            // Ghost is eaten by Pacman
+            pthread_mutex_lock(&score_mutex);
+            score += 200;
+            pthread_mutex_unlock(&score_mutex);
+            
+            // Ghost returns to starting position
+            ghost->needsRespawn = true;
+            ghost->cellContent = ' ';  // Clear the cell content
+            
+            // Move ghost back to ghost house
+            ghost->row = ghost->startRow;
+            ghost->col = ghost->startCol;
+            ghost->isVulnerable = false;
+            
+            // Set the ghost house flag to indicate ghost is in the house
+            ghost->inGhostHouse = true;
+        } else if (!invincible) {
+            // Pacman loses a life
+            pthread_mutex_lock(&life_mutex);
+            lives--;
+            pthread_mutex_unlock(&life_mutex);
+            
+            // Reset Pacman position
+            pacmanRow = PACMAN_START_ROW;
+            pacmanCol = PACMAN_START_COL;
+            
+            // Reset all ghosts
+            for (int i = 0; i < NUM_GHOSTS; i++) {
+                ghosts[i].row = ghosts[i].startRow;
+                ghosts[i].col = ghosts[i].startCol;
+                ghosts[i].isVulnerable = false;
+                ghosts[i].inGhostHouse = true;
+            }
+            
+            // Quick pause to make death noticeable
+            pthread_mutex_unlock(&mutex);
+            usleep(500000);
+            pthread_mutex_lock(&mutex);
+        }
+    } else {
+        // No collision with Pacman, update ghost position
+        ghost->cellContent = board[newRow][newCol];
+        ghost->row = newRow;
+        ghost->col = newCol;
+        
+        // Mark the new position on the board
+        if (ghost->isVulnerable) {
+            board[newRow][newCol] = 'v'; // Vulnerable ghost
+        } else {
+            board[newRow][newCol] = 'G'; // Regular ghost
+        }
+    }
+    
+    pthread_mutex_unlock(&mutex);
 }
 
 // Forward declarations
@@ -623,6 +763,157 @@ typedef struct TimerThreadArgs {
 } TimerThreadArgs;
 
 bool game_over = false;
+
+
+
+void* pacman(void* arg) {
+    // Set up keyboard input
+    struct termios old_tio, new_tio;
+    tcgetattr(STDIN_FILENO, &old_tio);
+    new_tio = old_tio;
+    new_tio.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+
+    fd_set rfds;
+    struct timeval tv;
+    int retval;
+
+    // Pacman movement direction
+    int direction = 0;  // 0: up, 1: down, 2: left, 3: right
+
+    while (!game_over) {
+        // Check for keyboard input
+        FD_ZERO(&rfds);
+        FD_SET(0, &rfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000;
+
+        retval = select(1, &rfds, NULL, NULL, &tv);
+
+        if (retval) {
+            char c;
+            read(0, &c, 1);
+            switch (c) {
+                case 'w':
+                    direction = 0;  // up
+                    break;
+                case 's':
+                    direction = 1;  // down
+                    break;
+                case 'a':
+                    direction = 2;  // left
+                    break;
+                case 'd':
+                    direction = 3;  // right
+                    break;
+                case 'q':
+                    game_over = 1;
+                    break;
+            }
+        }
+
+        // Move Pacman based on direction
+        pthread_mutex_lock(&mutex);
+        int new_row = pacman_row;
+        int new_col = pacman_col;
+
+        switch (direction) {
+            case 0:  // up
+                new_row--;
+                break;
+            case 1:  // down
+                new_row++;
+                break;
+            case 2:  // left
+                new_col--;
+                break;
+            case 3:  // right
+                new_col++;
+                break;
+        }
+
+        // Check if the new position is valid and update Pacman's position
+        if (new_row >= 0 && new_row < ROWS && new_col >= 0 && new_col < COLS &&
+            board[new_row][new_col] != '#') {
+            // Check if Pacman eats a dot
+            if (board[new_row][new_col] == '.') {
+                pthread_mutex_lock(&score_mutex);
+                score += 10;
+                dots_remaining--;
+                pthread_mutex_unlock(&score_mutex);
+            }
+            // Check if Pacman eats a power pellet
+            else if (board[new_row][new_col] == 'O') {
+                pthread_mutex_lock(&score_mutex);
+                score += 50;
+                pthread_mutex_unlock(&score_mutex);
+                power_pellet_active = 1;
+                // Create a thread to handle the power pellet timer
+                pthread_t timer_thread;
+                pthread_create(&timer_thread, NULL, power_pellet_timer, NULL);
+            }
+
+            // Update Pacman's position on the board
+            board[pacman_row][pacman_col] = ' ';
+            pacman_row = new_row;
+            pacman_col = new_col;
+            board[pacman_row][pacman_col] = 'P';
+
+            // Check if Pacman collides with a ghost
+            for (int i = 0; i < NUM_GHOSTS; i++) {
+                if (ghost_row[i] == pacman_row && ghost_col[i] == pacman_col) {
+                    if (power_pellet_active) {
+                        // Pacman eats the ghost
+                        pthread_mutex_lock(&score_mutex);
+                        score += 200;
+                        pthread_mutex_unlock(&score_mutex);
+                        // Respawn ghost at starting position
+                        ghost_row[i] = GHOST_START_ROW;
+                        ghost_col[i] = GHOST_START_COL;
+                    } else {
+                        // Ghost eats Pacman
+                        pthread_mutex_lock(&life_mutex);
+                        lives--;
+                        pthread_mutex_unlock(&life_mutex);
+                        // Respawn Pacman at starting position
+                        pacman_row = PACMAN_START_ROW;
+                        pacman_col = PACMAN_START_COL;
+                        // Respawn all ghosts at starting positions
+                        for (int j = 0; j < NUM_GHOSTS; j++) {
+                            ghost_row[j] = GHOST_START_ROW;
+                            ghost_col[j] = GHOST_START_COL;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Check if all dots are eaten
+        pthread_mutex_lock(&score_mutex);
+        if (dots_remaining == 0) {
+            game_over = 1;
+            win = 1;
+        }
+        pthread_mutex_unlock(&score_mutex);
+
+        // Check if all lives are lost
+        pthread_mutex_lock(&life_mutex);
+        if (lives == 0) {
+            game_over = 1;
+            win = 0;
+        }
+        pthread_mutex_unlock(&life_mutex);
+
+        pthread_mutex_unlock(&mutex);
+        usleep(200000);  // Sleep for 200ms
+    }
+
+    // Restore terminal settings
+    tcsetattr(STDIN_FILENO, TCSANOW, &old_tio);
+
+    return NULL;
+}
 // Main function for ghost thread
 void* ghostThreadFunc(void* arg) {
     Ghost* ghost = (Ghost*)arg;  // Changed from int to Ghost* since errors suggest ghost is a struct
@@ -935,118 +1226,109 @@ void initGameState() {
     pthread_mutex_init(&gameState.mutex, NULL);
 }
 
+// 9. Improved pacman movement for smoother gameplay
 void movePacman() {
-    pthread_mutex_lock(&gameState.mutex);
+    pthread_mutex_lock(&mutex);
     
-    switch(gameState.currentDirection) {
-        case DIR_UP:
-            if (gameState.pacmanRow > 0 && gameState.board[gameState.pacmanRow-1][gameState.pacmanCol] != '=') {
-                if(gameState.board[gameState.pacmanRow-1][gameState.pacmanCol] == '.') {
-                    gameState.score += 10;
-                }
-                else if(gameState.board[gameState.pacmanRow-1][gameState.pacmanCol] == '0') {
-                    gameState.score += 50;
-                    gameState.powerPelletActive = true;
-                    gameState.ghostVulnerable = true; 
-                    gameState.powerPelletDuration = 0.0f;
-                    gameState.ghostVulnerableDuration = 0.0f;
-                }
-                else if(gameState.board[gameState.pacmanRow-1][gameState.pacmanCol] == '#') {
-                    gameState.ghostVulnerable = true;
-                    gameState.ghostVulnerableDuration = 0.0f;
-                    gameState.score += 200;
-                }
-                
-                gameState.board[gameState.pacmanRow][gameState.pacmanCol] = ' ';
-                gameState.pacmanRow--;
-                gameState.board[gameState.pacmanRow][gameState.pacmanCol] = '@';
+    // Get current position
+    int currentRow = pacmanRow;
+    int currentCol = pacmanCol;
+    
+    // Clear current position
+    board[currentRow][currentCol] = ' ';
+    
+    // Calculate new position based on current direction
+    int newRow = currentRow;
+    int newCol = currentCol;
+    
+    switch (pacmanDirection) {
+        case UP:
+            if (currentRow > 0 && board[currentRow - 1][currentCol] != '#') {
+                newRow = currentRow - 1;
             }
-             gameState.pacmanRotation = 90.0f; // Face up
             break;
-        case DIR_DOWN:
-            if (gameState.pacmanRow < ROWS-1 && gameState.board[gameState.pacmanRow+1][gameState.pacmanCol] != '=') {
-                if(gameState.board[gameState.pacmanRow+1][gameState.pacmanCol] == '.') {
-                    gameState.score += 10;
-                }
-                else if(gameState.board[gameState.pacmanRow+1][gameState.pacmanCol] == '0') {
-                    gameState.score += 50; 
-                    gameState.powerPelletActive = true;
-                    gameState.ghostVulnerable = true;
-                    gameState.powerPelletDuration = 0.0f;
-                    gameState.ghostVulnerableDuration = 0.0f;
-                }
-                else if(gameState.board[gameState.pacmanRow+1][gameState.pacmanCol] == '#') {
-                    gameState.ghostVulnerable = true;
-                    gameState.ghostVulnerableDuration = 0.0f;
-                    gameState.score += 200; 
-                }
-                
-                gameState.board[gameState.pacmanRow][gameState.pacmanCol] = ' ';
-                gameState.pacmanRow++;
-                gameState.board[gameState.pacmanRow][gameState.pacmanCol] = '@';
+        case DOWN:
+            if (currentRow < ROWS - 1 && board[currentRow + 1][currentCol] != '#') {
+                newRow = currentRow + 1;
             }
-            gameState.pacmanRotation = 270.0f; // Face down
             break;
-        case DIR_LEFT:
-            if (gameState.pacmanCol > 0 && gameState.board[gameState.pacmanRow][gameState.pacmanCol-1] != '=') {
-                if(gameState.board[gameState.pacmanRow][gameState.pacmanCol-1] == '.') {
-                    gameState.score += 10; 
-                }
-                else if(gameState.board[gameState.pacmanRow][gameState.pacmanCol-1] == '0') {
-                    gameState.score += 50; 
-                    gameState.powerPelletActive = true;
-                    gameState.ghostVulnerable = true;
-                    gameState.powerPelletDuration = 0.0f;
-                    gameState.ghostVulnerableDuration = 0.0f;
-                }
-                else if(gameState.board[gameState.pacmanRow][gameState.pacmanCol-1] == '#') {
-                    gameState.ghostVulnerable = true;
-                    gameState.ghostVulnerableDuration = 0.0f;
-                    gameState.score += 200;
-                }
-                
-                gameState.board[gameState.pacmanRow][gameState.pacmanCol] = ' ';
-                gameState.pacmanCol--;
-                gameState.board[gameState.pacmanRow][gameState.pacmanCol] = '@';
+        case LEFT:
+            if (currentCol > 0 && board[currentRow][currentCol - 1] != '#') {
+                newCol = currentCol - 1;
             }
-            gameState.pacmanRotation = 0.0f; // Face left
             break;
-        case DIR_RIGHT:
-            if (gameState.pacmanCol < COLS-1 && gameState.board[gameState.pacmanRow][gameState.pacmanCol+1] != '=') {
-                if(gameState.board[gameState.pacmanRow][gameState.pacmanCol+1] == '.') {
-                    gameState.score += 10;
-                }
-                else if (gameState.board[gameState.pacmanRow][gameState.pacmanCol+1] == '0') {
-                    gameState.score += 50; 
-                    gameState.powerPelletActive = true;
-                    gameState.ghostVulnerable = true;
-                    gameState.powerPelletDuration = 0.0f;
-                    gameState.ghostVulnerableDuration = 0.0f;
-                }
-                else if(gameState.board[gameState.pacmanRow][gameState.pacmanCol+1] == '#') {
-                    gameState.ghostVulnerable = true;
-                    gameState.ghostVulnerableDuration = 0.0f;
-                    gameState.score += 200;
-                }
-                
-                gameState.board[gameState.pacmanRow][gameState.pacmanCol] = ' ';
-                gameState.pacmanCol++;
-                gameState.board[gameState.pacmanRow][gameState.pacmanCol] = '@';
+        case RIGHT:
+            if (currentCol < COLS - 1 && board[currentRow][currentCol + 1] != '#') {
+                newCol = currentCol + 1;
             }
-            gameState.pacmanRotation = 180.0f; // Face right
-            break;
-        case DIR_NONE:
             break;
     }
     
-    if (gameState.powerPelletActive) {
-        if (gameState.board[gameState.pacmanRow][gameState.pacmanCol] == '#') {
-            gameState.score += 200;
-            gameState.board[gameState.pacmanRow][gameState.pacmanCol] = ' ';
-        }
+    // Check what's at the new position
+    char cell = board[newRow][newCol];
+    
+    // Handle different cell types
+    switch (cell) {
+        case '.': // Regular dot
+            pthread_mutex_lock(&score_mutex);
+            score += 10;
+            dotsRemaining--;
+            pthread_mutex_unlock(&score_mutex);
+            break;
+            
+        case 'O': // Power pellet
+            eatPowerPellet();
+            break;
+            
+        case 'G': // Regular ghost
+            if (!invincible) {
+                pthread_mutex_lock(&life_mutex);
+                lives--;
+                pthread_mutex_unlock(&life_mutex);
+                
+                // Reset positions
+                pacmanRow = PACMAN_START_ROW;
+                pacmanCol = PACMAN_START_COL;
+                
+                for (int i = 0; i < NUM_GHOSTS; i++) {
+                    ghosts[i].row = ghosts[i].startRow;
+                    ghosts[i].col = ghosts[i].startCol;
+                    ghosts[i].isVulnerable = false;
+                    ghosts[i].inGhostHouse = true;
+                }
+                
+                pthread_mutex_unlock(&mutex);
+                usleep(500000); // Short pause
+                return;
+            }
+            break;
+            
+        case 'v': // Vulnerable ghost
+            // Find which ghost is at this position
+            for (int i = 0; i < NUM_GHOSTS; i++) {
+                if (ghosts[i].row == newRow && ghosts[i].col == newCol) {
+                    // Eat the ghost
+                    pthread_mutex_lock(&score_mutex);
+                    score += 200;
+                    pthread_mutex_unlock(&score_mutex);
+                    
+                    // Send ghost back to ghost house
+                    ghosts[i].needsRespawn = true;
+                    ghosts[i].inGhostHouse = true;
+                    ghosts[i].row = ghosts[i].startRow;
+                    ghosts[i].col = ghosts[i].startCol;
+                    break;
+                }
+            }
+            break;
     }
-    pthread_mutex_unlock(&gameState.mutex);
-   // checkGhostCollision();
+    
+    // Update Pacman's position
+    pacmanRow = newRow;
+    pacmanCol = newCol;
+    board[pacmanRow][pacmanCol] = 'P';
+    
+    pthread_mutex_unlock(&mutex);
 }
 
 void renderMenu(sfRenderWindow* window, sfFont* font) {
